@@ -16,13 +16,13 @@ st.title("Stock Analysis Dashboard")
 
 # -- Sidebar --------------------------------------------------
 st.sidebar.header("Settings")
-ticker_options = ["AAPL", "MSFT", "NVDA", "TSLA", "DKNG"]
 
-tickers = st.sidebar.multiselect(
-    "Select 2 – 5 stock tickers",
-    options=ticker_options,
-    max_selections=5,
+raw_input = st.sidebar.text_input(
+    "Enter 2 – 5 stock tickers (comma-separated)",
+    value="AAPL, MSFT, NVDA",
+    help="Type any valid yfinance ticker, e.g. AAPL, BTC-USD, ^GSPC, MSFT",
 )
+tickers = [t.strip().upper() for t in raw_input.split(",") if t.strip()][:5]
 
 default_start = date.today() - timedelta(days=365)
 start_date = st.sidebar.date_input("Start Date", value=default_start, min_value=date(1970, 1, 1))
@@ -58,7 +58,6 @@ def load_data(tickers: tuple[str, ...], start: date, end: date) -> pd.DataFrame:
         close.columns = [tickers[0]]
 
     return close
-
 
 @st.cache_data(ttl=3600)
 def validate_and_align(
@@ -239,7 +238,7 @@ fig_price.update_layout(
     height=450,
     legend_title="Ticker",
 )
-st.plotly_chart(fig_price, use_container_width=True)
+st.plotly_chart(fig_price, use_container_width=True, key="fig_price")
 
 st.divider()
 
@@ -263,4 +262,140 @@ fig_norm.update_layout(
     height=400,
     legend_title="Ticker",
 )
-st.plotly_chart(fig_norm, use_container_width=True)
+st.plotly_chart(fig_norm, use_container_width=True, key="fig_norm")
+
+st.divider()
+
+# ─────────────────────────────────────────────────────────────────
+# Section 2.2 – Price and Return Analysis
+# ─────────────────────────────────────────────────────────────────
+st.header("Price and Return Analysis")
+
+user_tickers_22 = [t for t in price_data if t != "^GSPC"]
+
+selected_22 = st.multiselect(
+    "Select stocks to display",
+    options=user_tickers_22,
+    default=user_tickers_22,
+    help="Check or uncheck tickers to show/hide them on the charts below.",
+)
+
+if not selected_22:
+    st.warning("Select at least one stock to display the analysis.")
+    st.stop()
+
+# ── 1. Adjusted Closing Price Chart ─────────────────────────────
+st.subheader("Adjusted Closing Prices")
+st.caption("S&P 500 (^GSPC) is always shown in index points; other tickers in USD.")
+
+show_tickers_22 = selected_22 + (["^GSPC"] if "^GSPC" in price_data else [])
+
+fig_adj = go.Figure()
+for tkr in show_tickers_22:
+    df = price_data[tkr]
+    fig_adj.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["Close"],
+            mode="lines",
+            name=tkr,
+            line=dict(width=2 if tkr == "^GSPC" else 1.5),
+        )
+    )
+fig_adj.update_layout(
+    yaxis_title="Price (USD) / Index Points",
+    xaxis_title="Date",
+    template="plotly_white",
+    height=450,
+    legend_title="Ticker",
+)
+st.plotly_chart(fig_adj, use_container_width=True, key="fig_adj")
+
+# ── 2 & 3. Daily Returns + Summary Statistics Table ─────────────
+st.subheader("Summary Statistics")
+st.caption(
+    "Annualised figures use 252 trading days. "
+    "Kurtosis is excess kurtosis (normal distribution = 0)."
+)
+
+rows_22 = []
+for tkr in show_tickers_22:
+    r = price_data[tkr]["Daily Return"].dropna()
+    rows_22.append(
+        {
+            "Ticker": tkr,
+            "Ann. Mean Return": r.mean() * 252,
+            "Ann. Volatility": r.std() * math.sqrt(252),
+            "Skewness": float(r.skew()),
+            "Kurtosis": float(r.kurt()),
+            "Min Daily Return": float(r.min()),
+            "Max Daily Return": float(r.max()),
+        }
+    )
+
+stats_df = pd.DataFrame(rows_22).set_index("Ticker")
+st.dataframe(
+    stats_df.style.format(
+        {
+            "Ann. Mean Return": "{:.2%}",
+            "Ann. Volatility": "{:.2%}",
+            "Skewness": "{:.3f}",
+            "Kurtosis": "{:.3f}",
+            "Min Daily Return": "{:.2%}",
+            "Max Daily Return": "{:.2%}",
+        }
+    ),
+    use_container_width=True,
+)
+
+# ── 4. Cumulative Wealth Index ($10,000 investment) ───────────────
+st.subheader("Cumulative Wealth Index  ($10,000 initial investment)")
+st.caption(
+    "Equal-weight portfolio return each day = simple average of all selected stocks' daily returns."
+)
+
+INITIAL_INVESTMENT = 10_000
+
+fig_wealth = go.Figure()
+
+for tkr in show_tickers_22:
+    r = price_data[tkr]["Daily Return"].dropna()
+    wealth = INITIAL_INVESTMENT * (1 + r).cumprod()
+    fig_wealth.add_trace(
+        go.Scatter(
+            x=wealth.index,
+            y=wealth,
+            mode="lines",
+            name=tkr,
+            line=dict(width=2 if tkr == "^GSPC" else 1.5),
+        )
+    )
+
+# Equal-weight portfolio of selected user stocks
+if len(selected_22) >= 2:
+    ew_daily = (
+        pd.concat(
+            [price_data[t]["Daily Return"].rename(t) for t in selected_22], axis=1
+        )
+        .dropna()
+        .mean(axis=1)
+    )
+    ew_wealth = INITIAL_INVESTMENT * (1 + ew_daily).cumprod()
+    fig_wealth.add_trace(
+        go.Scatter(
+            x=ew_wealth.index,
+            y=ew_wealth,
+            mode="lines",
+            name="Equal-Weight Portfolio",
+            line=dict(width=2.5, dash="dash"),
+        )
+    )
+
+fig_wealth.update_layout(
+    yaxis_title="Portfolio Value (USD)",
+    xaxis_title="Date",
+    template="plotly_white",
+    height=450,
+    legend_title="",
+)
+st.plotly_chart(fig_wealth, use_container_width=True, key="fig_wealth")
