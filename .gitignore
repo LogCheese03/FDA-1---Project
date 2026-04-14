@@ -1,6 +1,9 @@
 # Virtual environment (managed by uv — don't upload to GitHub)
 .venv/
 
+# Streamlit config / secrets
+.streamlit/
+
 # Python cache files
 __pycache__/
 *.pyc
