@@ -53,6 +53,18 @@ def load_data(tickers: tuple[str, ...], start: date, end: date) -> pd.DataFrame:
     else:
         close = raw[["Close"]].copy()
         close.columns = [tickers[0]]
+
+    # yfinance batch downloads occasionally return all-NaN for a valid ticker.
+    # Retry those individually so they don't get falsely flagged as bad data.
+    for sym in symbols:
+        if sym in close.columns and close[sym].isna().all():
+            try:
+                single = yf.download(sym, start=start, end=end, progress=False, auto_adjust=True)
+                if not single.empty:
+                    close[sym] = single["Close"]
+            except Exception:
+                pass
+
     return close
 
 @st.cache_data(ttl=3600)
