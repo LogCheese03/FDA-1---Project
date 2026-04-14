@@ -5,7 +5,6 @@
 # -------------------------------------------------------
 
 import math
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -55,7 +54,6 @@ def load_data(tickers: tuple[str, ...], start: date, end: date) -> pd.DataFrame:
         close = raw[["Close"]].copy()
         close.columns = [tickers[0]]
     return close
-
 
 @st.cache_data(ttl=3600)
 def validate_and_align(
