@@ -1,6 +1,6 @@
 # app.py
 # -------------------------------------------------------
-# A simple Streamlit stock analysis dashboard.
+# A Streamlit stock analysis dashboard supporting 2-5 tickers.
 # Run with:  uv run streamlit run app.py
 # -------------------------------------------------------
 
@@ -11,97 +11,120 @@ import plotly.graph_objects as go
 from datetime import date, timedelta
 import math
 
-# -- Page configuration ----------------------------------
-# st.set_page_config must be the FIRST Streamlit command in the script.
-# If you add any other st.* calls above this line, you'll get an error.
 st.set_page_config(page_title="Stock Analyzer", layout="wide")
 st.title("Stock Analysis Dashboard")
 
-# -- Sidebar: user inputs --------------------------------
+# -- Sidebar --------------------------------------------------
 st.sidebar.header("Settings")
+ticker_options = ["AAPL", "MSFT", "NVDA", "TSLA", "DKNG"]
 
-ticker = st.sidebar.text_input("Stock Ticker", value="AAPL").upper().strip()
+tickers = st.sidebar.multiselect(
+    "Select 2 – 5 stock tickers",
+    options=ticker_options,
+    max_selections=5,
+)
 
-
-# Default date range: one year back from today
 default_start = date.today() - timedelta(days=365)
 start_date = st.sidebar.date_input("Start Date", value=default_start, min_value=date(1970, 1, 1))
-end_date = st.sidebar.date_input("End Date", value=date.today(), min_value=date(1970, 1, 1))
+end_date   = st.sidebar.date_input("End Date",   value=date.today(), min_value=date(1970, 1, 1))
 
-# Validate that the date range makes sense
+if len(tickers) < 2:
+    st.info("Select 2 to 5 stock tickers to compare.")
+    st.stop()
+
 if start_date >= end_date:
     st.sidebar.error("Start date must be before end date.")
     st.stop()
 
-# -- Data download ----------------------------------------
-# We wrap the download in st.cache_data so repeated runs with
-# the same inputs don't re-download every time. The ttl (time-to-live)
-# ensures the cache expires after one hour so data stays fresh.
-@st.cache_data(show_spinner="Fetching data...", ttl=3600)
-def load_data(ticker: str, start: date, end: date) -> pd.DataFrame:
-    """Download daily data from Yahoo Finance for a given date range."""
-    df = yf.download(ticker, start=start, end=end, progress=False)
-    return df
+# -- Data download --------------------------------------------
+@st.cache_data(show_spinner="Fetching data…", ttl=3600)
+def load_data(tickers: tuple[str, ...], start: date, end: date) -> pd.DataFrame:
+    """Download daily OHLCV data; returns a tidy DataFrame with a (field, ticker) MultiIndex."""
+    return yf.download(list(tickers), start=start, end=end, progress=False)
 
-# -- Main logic -------------------------------------------
-if ticker:
-    try:
-        df = load_data(ticker, start_date, end_date)
-    except Exception as e:
-        st.error(f"Failed to download data: {e}")
-        st.stop()
+try:
+    raw = load_data(tuple(tickers), start_date, end_date)
+except Exception as e:
+    st.error(f"Failed to download data: {e}")
+    st.stop()
 
-    if df.empty:
-        st.error(
-            f"No data found for **{ticker}**. "
-            "Check the ticker symbol and try again."
-        )
-        st.stop()
+if raw.empty:
+    st.error("No data returned. Check your ticker symbols and date range.")
+    st.stop()
 
-    # Flatten any multi-level columns that yfinance sometimes returns
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+# -- Build a clean per-ticker dictionary ----------------------
+# yfinance returns a MultiIndex (field, ticker) for multiple symbols.
+# We split it into {ticker: DataFrame} so every chart/metric loop is simple.
+price_data: dict[str, pd.DataFrame] = {}
 
-    # -- Compute a derived column -------------------------
-    df["Daily Return"] = df["Close"].pct_change()
-
-    # -- Key metrics --------------------------------------
-    latest_close = float(df["Close"].iloc[-1])
-    total_return = float((df["Close"].iloc[-1] / df["Close"].iloc[0]) - 1)
-    volatility = float(df["Daily Return"].std())
-    ann_volatility = volatility * math.sqrt(252)  # Annualize: daily sigma * sqrt(trading days)
-    max_close = float(df["Close"].max())
-    min_close = float(df["Close"].min())
-
-    st.subheader(f"{ticker} — Key Metrics")
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Latest Close", f"${latest_close:,.2f}")
-    col2.metric("1-Year Return", f"{total_return:.2%}")
-    col3.metric("Annualized Volatility (sigma)", f"{ann_volatility:.2%}")
-
-    col4, col5, _ = st.columns(3)
-    col4.metric("Period High", f"${max_close:,.2f}")
-    col5.metric("Period Low", f"${min_close:,.2f}")
-
-    st.divider()
-
-    # -- Price chart --------------------------------------
-    st.subheader("Closing Price")
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=df.index, y=df["Close"],
-            mode="lines", name="Close Price",
-            line=dict(width=1.5)
-        )
-    )
-    fig.update_layout(
-        yaxis_title="Price (USD)", xaxis_title="Date",
-        template="plotly_white", height=450
-    )
-    st.plotly_chart(fig, width="stretch")
-
+if isinstance(raw.columns, pd.MultiIndex):
+    for tkr in tickers:
+        try:
+            df = raw.xs(tkr, axis=1, level=1).copy()
+        except KeyError:
+            st.warning(f"No data found for **{tkr}** – skipping.")
+            continue
+        df["Daily Return"] = df["Close"].pct_change()
+        price_data[tkr] = df
 else:
-    st.info("Enter a stock ticker in the sidebar to get started.")
+    # Single-ticker fallback (yfinance drops the MultiIndex when len==1,
+    # but the sidebar already blocks <2, so this path shouldn't be hit in
+    # production. Kept for safety.)
+    df = raw.copy()
+    df["Daily Return"] = df["Close"].pct_change()
+    price_data[tickers[0]] = df
+
+if not price_data:
+    st.error("No usable data was downloaded for the selected tickers.")
+    st.stop()
+
+# -- Key Metrics (one column group per ticker) ----------------
+st.subheader("Key Metrics")
+
+cols = st.columns(len(price_data))
+for col, (tkr, df) in zip(cols, price_data.items()):
+    latest_close  = float(df["Close"].iloc[-1])
+    total_return  = float((df["Close"].iloc[-1] / df["Close"].iloc[0]) - 1)
+    ann_vol       = float(df["Daily Return"].std() * math.sqrt(252))
+    period_high   = float(df["Close"].max())
+    period_low    = float(df["Close"].min())
+
+    col.markdown(f"**{tkr}**")
+    col.metric("Latest Close",           f"${latest_close:,.2f}")
+    col.metric("Period Return",          f"{total_return:.2%}")
+    col.metric("Annualised Volatility",  f"{ann_vol:.2%}")
+    col.metric("Period High",            f"${period_high:,.2f}")
+    col.metric("Period Low",             f"${period_low:,.2f}")
+
+st.divider()
+
+# -- Closing Price Chart (all tickers on one chart) -----------
+st.subheader("Closing Price")
+
+fig_price = go.Figure()
+for tkr, df in price_data.items():
+    fig_price.add_trace(
+        go.Scatter(x=df.index, y=df["Close"], mode="lines", name=tkr, line=dict(width=1.5))
+    )
+fig_price.update_layout(
+    yaxis_title="Price (USD)", xaxis_title="Date",
+    template="plotly_white", height=450, legend_title="Ticker",
+)
+st.plotly_chart(fig_price, use_container_width=True)
+
+st.divider()
+
+# -- Normalised Returns Chart (base = 100 on first day) -------
+st.subheader("Normalised Returns (base = 100)")
+
+fig_norm = go.Figure()
+for tkr, df in price_data.items():
+    normalised = df["Close"] / df["Close"].iloc[0] * 100
+    fig_norm.add_trace(
+        go.Scatter(x=df.index, y=normalised, mode="lines", name=tkr, line=dict(width=1.5))
+    )
+fig_norm.update_layout(
+    yaxis_title="Indexed Price", xaxis_title="Date",
+    template="plotly_white", height=400, legend_title="Ticker",
+)
+st.plotly_chart(fig_norm, use_container_width=True)
